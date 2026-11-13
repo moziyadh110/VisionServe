@@ -1,16 +1,23 @@
+import hashlib
 import io
 from dataclasses import dataclass
 
 from fastapi import HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 
-ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
+CONTENT_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 
 
 @dataclass
 class DecodedImage:
     image: Image.Image
     data: bytes
+    format: str
+    sha256: str
+
+    @property
+    def content_type(self) -> str:
+        return CONTENT_TYPES[self.format]
 
 
 async def read_upload(upload: UploadFile, max_bytes: int) -> DecodedImage:
@@ -31,6 +38,11 @@ async def read_upload(upload: UploadFile, max_bytes: int) -> DecodedImage:
         image.load()
     except (UnidentifiedImageError, OSError) as exc:
         raise HTTPException(415, "Unsupported or corrupt image; use JPEG, PNG or WebP") from exc
-    if fmt not in ALLOWED_FORMATS:
+    if fmt not in CONTENT_TYPES:
         raise HTTPException(415, f"Unsupported image format {fmt}; use JPEG, PNG or WebP")
-    return DecodedImage(image=image.convert("RGB"), data=data)
+    return DecodedImage(
+        image=image.convert("RGB"),
+        data=data,
+        format=fmt,
+        sha256=hashlib.sha256(data).hexdigest(),
+    )

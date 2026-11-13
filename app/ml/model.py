@@ -19,9 +19,9 @@ TASK_PROMPTS = {
 
 
 class ImageModel(Protocol):
-    """Anything with predict() can serve requests; tests use a fake."""
+    """Anything with predict_batch() can serve requests; tests use a fake."""
 
-    def predict(self, image: Image.Image, task: Task) -> str: ...
+    def predict_batch(self, images: list[Image.Image], task: Task) -> list[str]: ...
 
 
 class Florence2Model:
@@ -62,12 +62,17 @@ class Florence2Model:
         model.to(device).eval()
         return cls(model, processor, device, dtype, max_new_tokens)
 
-    def predict(self, image: Image.Image, task: Task) -> str:
-        """Blocking GPU call. Must only run in the GPU worker thread, never on the event loop."""
+    def predict_batch(self, images: list[Image.Image], task: Task) -> list[str]:
+        """One forward pass for a whole batch of images that share a task.
+
+        Blocking GPU call: must only run in the GPU worker thread. The GPU does N
+        images in little more time than one, which is where batching's throughput
+        gain comes from.
+        """
         import torch
 
         prompt = TASK_PROMPTS[task]
-        inputs = self.processor(text=prompt, images=image, return_tensors="pt")
+        inputs = self.processor(text=[prompt] * len(images), images=images, return_tensors="pt")
         with torch.inference_mode():
             generated = self.model.generate(
                 input_ids=inputs["input_ids"].to(self.device),
@@ -76,8 +81,12 @@ class Florence2Model:
                 num_beams=3,
                 do_sample=False,
             )
-        raw = self.processor.batch_decode(generated, skip_special_tokens=False)[0]
-        parsed = self.processor.post_process_generation(
-            raw, task=prompt, image_size=(image.width, image.height)
-        )
-        return str(parsed[prompt]).strip()
+        raw_texts = self.processor.batch_decode(generated, skip_special_tokens=False)
+        results = []
+        for raw, image in zip(raw_texts, images, strict=True):
+            # Shorter outputs in a batch are padded; strip that before parsing.
+            parsed = self.processor.post_process_generation(
+                raw.replace("<pad>", ""), task=prompt, image_size=(image.width, image.height)
+            )
+            results.append(str(parsed[prompt]).strip())
+        return results

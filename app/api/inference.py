@@ -1,17 +1,32 @@
 import asyncio
 import time
 
+import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.cache.results import cache_key, get_cached, set_cached
+from app.core.rate_limit import rate_limited_user
 from app.db.models import InferenceRequest, User
 from app.db.queries import get_or_create_image
 from app.db.session import get_session
+from app.ml.batcher import QueueFull
 from app.ml.images import read_upload
 from app.schemas.inference import InferenceResponse, InferenceResult, Task
 
 router = APIRouter(prefix="/v1", tags=["inference"])
+log = structlog.get_logger()
+
+
+def _ms_since(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
+async def _save(session: AsyncSession, **fields) -> InferenceRequest:
+    row = InferenceRequest(**fields)
+    session.add(row)
+    await session.commit()
+    return row
 
 
 @router.post("/infer/{task}", response_model=InferenceResponse)
@@ -19,62 +34,80 @@ async def infer(
     task: Task,
     request: Request,
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(rate_limited_user),  # auth -> rate limit
     session: AsyncSession = Depends(get_session),
 ) -> InferenceResponse:
+    """auth -> rate limit -> validate -> hash -> cache -> store image -> batch -> GPU
+    -> cache write -> save row -> respond."""
     state = request.app.state
+    settings = state.settings
     if state.model is None:
         raise HTTPException(503, "Model is still loading")
 
     # Copy plain values now: a rollback inside get_or_create_image expires ORM objects,
     # and touching an expired attribute in async code would try a hidden DB call.
     user_id = user.id
-    upload = await read_upload(file, state.settings.max_upload_bytes)
-    image = await get_or_create_image(session, user_id, upload)
-    image_id = image.id
-
-    # model.predict blocks for tens of milliseconds. Calling it directly here would
-    # freeze the event loop, and every other request (even /healthz) would wait.
-    # Instead it runs on the single GPU thread while this coroutine awaits.
-    loop = asyncio.get_running_loop()
+    upload = await read_upload(file, settings.max_upload_bytes)
     start = time.perf_counter()
-    try:
-        text = await loop.run_in_executor(
-            state.gpu_executor, state.model.predict, upload.image, task
-        )
-    except Exception as exc:
-        session.add(
-            InferenceRequest(
-                user_id=user_id,
-                image_id=image_id,
-                task=task.value,
-                status="error",
-                latency_ms=int((time.perf_counter() - start) * 1000),
-                error=str(exc)[:500],
-            )
-        )
-        await session.commit()
-        raise HTTPException(500, "Inference failed") from exc
-    latency_ms = int((time.perf_counter() - start) * 1000)
 
-    row = InferenceRequest(
-        user_id=user_id,
-        image_id=image_id,
-        task=task.value,
-        status="ok",
-        cache_hit=False,
-        batch_size=1,
-        latency_ms=latency_ms,
-        result={"text": text},
-    )
-    session.add(row)
+    key = cache_key(task.value, settings.model_version, upload.sha256)
+    cached = await get_cached(state.redis, key)
+    image_id = (await get_or_create_image(session, state.storage, user_id, upload)).id
+    # Commit now so the DB connection goes back to the pool while we wait on the GPU.
+    # Holding a transaction open across inference would pin one pooled connection per
+    # in-flight request and exhaust the pool long before the GPU is the bottleneck.
     await session.commit()
+    base = dict(user_id=user_id, image_id=image_id, task=task.value)
 
+    if cached is not None:
+        latency_ms = _ms_since(start)
+        row = await _save(
+            session, **base, status="ok", cache_hit=True, latency_ms=latency_ms,
+            result={"text": cached},
+        )  # fmt: skip
+        return InferenceResponse(
+            request_id=row.id,
+            task=task,
+            result=InferenceResult(text=cached),
+            cache_hit=True,
+            batch_size=None,
+            latency_ms=latency_ms,
+        )
+
+    # The GPU work happens in the batcher's worker thread; this coroutine just
+    # awaits its future, so the event loop stays free for other requests.
+    try:
+        out = await asyncio.wait_for(
+            state.batcher.submit(upload.image, task), settings.inference_timeout_s
+        )
+    except QueueFull:
+        raise HTTPException(
+            503, "Server is overloaded, try again shortly", headers={"Retry-After": "1"}
+        ) from None
+    except TimeoutError:
+        await _save(
+            session, **base, status="timeout", latency_ms=_ms_since(start),
+            error=f"timed out after {settings.inference_timeout_s}s",
+        )  # fmt: skip
+        raise HTTPException(504, "Inference timed out") from None
+    except Exception as exc:
+        log.exception("inference_failed", task=task.value)
+        await _save(
+            session, **base, status="error", latency_ms=_ms_since(start), error=str(exc)[:500]
+        )
+        raise HTTPException(500, "Inference failed") from exc
+
+    await set_cached(state.redis, key, out.text, settings.cache_ttl_s)
+    latency_ms = _ms_since(start)
+    row = await _save(
+        session, **base, status="ok", cache_hit=False, batch_size=out.batch_size,
+        latency_ms=latency_ms, result={"text": out.text},
+    )  # fmt: skip
     return InferenceResponse(
         request_id=row.id,
         task=task,
-        result=InferenceResult(text=text),
+        result=InferenceResult(text=out.text),
         cache_hit=False,
-        batch_size=1,
+        batch_size=out.batch_size,
         latency_ms=latency_ms,
     )

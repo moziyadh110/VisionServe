@@ -19,7 +19,8 @@ class InferenceResponse(BaseModel):
     task: Task
     result: InferenceResult
     cache_hit: bool
-    batch_size: int
+    # Size of the GPU batch this request ran in; null on a cache hit (no GPU work).
+    batch_size: int | None
     latency_ms: int
 
 
@@ -44,3 +45,9 @@ class RequestPage(BaseModel):
     items: list[RequestRecord]
     # Pass this back as ?cursor= to get the next page; null means no more pages.
     next_cursor: int | None
+
+
+class ImageUrl(BaseModel):
+    image_id: int
+    url: str
+    expires_in_s: int
