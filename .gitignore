@@ -12,6 +12,9 @@ build/
 # Secrets and local config
 .env
 
+# Personal notes and docs (kept local, not on GitHub)
+*.md
+
 # Model weights / caches
 .cache/
 hf_cache/
