@@ -1,6 +1,6 @@
 """Shared fixtures.
 
-Tests never touch a GPU, Postgres, Redis or MinIO: a FakeModel stands in for
+Tests never touch a GPU, Postgres, Redis or S3 storage: a FakeModel stands in for
 Florence-2, each test gets a fresh SQLite file created from the same models,
 fakeredis (which also runs our Lua script) replaces Redis, and FakeStorage keeps
 objects in a dict.

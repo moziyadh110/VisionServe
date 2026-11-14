@@ -1,6 +1,6 @@
-"""Real Postgres, Redis and MinIO (fake model). Needs the compose services and migrations:
+"""Real Postgres, Redis and S3 storage (fake model). Needs the compose services and migrations:
 
-docker compose up -d postgres redis minio
+docker compose up -d postgres redis storage
 uv run alembic upgrade head
 uv run pytest -m integration
 """

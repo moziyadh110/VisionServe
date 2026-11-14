@@ -1,4 +1,4 @@
-"""Image storage in MinIO (local) or S3 (cloud) through boto3.
+"""Image storage in a local S3-compatible server (RustFS) or AWS S3, through boto3.
 
 Postgres keeps only metadata and the object key; the bytes live here. Object
 stores are built for large blobs (cheap, no table bloat, served directly to
@@ -35,7 +35,7 @@ class S3Storage:
         )
         self.client = boto3.client("s3", endpoint_url=settings.s3_endpoint_url or None, **common)
         # Pre-signed URLs embed the host they were signed for. Inside Docker the API
-        # reaches MinIO as http://minio:9000, but a browser needs http://localhost:9000.
+        # reaches storage as http://storage:9000, but a browser needs http://localhost:9000.
         public = settings.s3_public_endpoint_url or settings.s3_endpoint_url or None
         self.signer = boto3.client("s3", endpoint_url=public, **common)
 

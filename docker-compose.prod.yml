@@ -1,7 +1,7 @@
 # Cloud VM overrides:
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 #
-# - Images go to real S3 instead of MinIO (config only, no code change).
+# - Images go to real S3 instead of the local storage container (config only, no code change).
 # - Postgres and Redis are no longer published on the host: only the API container
 #   can reach them, over the internal compose network.
 # - Caddy terminates HTTPS on 443 and is the only public entry point.
@@ -31,7 +31,7 @@ services:
   redis:
     ports: !reset []
 
-  minio:
+  storage:
     profiles: ["local-only"]  # never started in production
 
   caddy:

@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     rate_limit_free_per_min: int = 60
     rate_limit_pro_per_min: int = 600
 
-    # Object storage (MinIO locally, S3 in the cloud: only these values change)
+    # Object storage (RustFS locally, S3 in the cloud: only these values change)
     s3_endpoint_url: str | None = "http://localhost:9000"
     # Host used inside pre-signed URLs; must be reachable by the client's browser.
     s3_public_endpoint_url: str | None = None
