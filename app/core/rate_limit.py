@@ -28,9 +28,6 @@ from app.db.models import User
 
 log = structlog.get_logger()
 
-# Requests per minute by plan.
-PLAN_LIMITS = {"free": 60, "pro": 600}
-
 TOKEN_BUCKET_LUA = """
 local key = KEYS[1]
 local capacity = tonumber(ARGV[1])
@@ -108,7 +105,9 @@ class RateLimiter:
 
 async def rate_limited_user(request: Request, user: User = Depends(get_current_user)) -> User:
     """Dependency: authenticate, then spend one unit of the user's rate limit."""
-    limit = PLAN_LIMITS.get(user.plan, PLAN_LIMITS["free"])
+    settings = request.app.state.settings
+    limits = {"free": settings.rate_limit_free_per_min, "pro": settings.rate_limit_pro_per_min}
+    limit = limits.get(user.plan, settings.rate_limit_free_per_min)
     decision = await request.app.state.rate_limiter.check(user.id, limit)
     if not decision.allowed:
         raise HTTPException(

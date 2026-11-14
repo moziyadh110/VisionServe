@@ -1,0 +1,7 @@
+# Caddy gets and renews a Let's Encrypt certificate for $DOMAIN automatically.
+{$DOMAIN} {
+	# /metrics is for internal scraping only.
+	respond /metrics 404
+
+	reverse_proxy api:8000
+}

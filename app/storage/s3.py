@@ -27,15 +27,16 @@ class S3Storage:
         self.bucket = settings.s3_bucket
         self.region = settings.s3_region
         common = dict(
-            aws_access_key_id=settings.s3_access_key,
-            aws_secret_access_key=settings.s3_secret_key,
+            # Empty values mean "not set": on AWS, boto3 then uses the VM's IAM role.
+            aws_access_key_id=settings.s3_access_key or None,
+            aws_secret_access_key=settings.s3_secret_key or None,
             region_name=settings.s3_region,
             config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
         )
-        self.client = boto3.client("s3", endpoint_url=settings.s3_endpoint_url, **common)
+        self.client = boto3.client("s3", endpoint_url=settings.s3_endpoint_url or None, **common)
         # Pre-signed URLs embed the host they were signed for. Inside Docker the API
         # reaches MinIO as http://minio:9000, but a browser needs http://localhost:9000.
-        public = settings.s3_public_endpoint_url or settings.s3_endpoint_url
+        public = settings.s3_public_endpoint_url or settings.s3_endpoint_url or None
         self.signer = boto3.client("s3", endpoint_url=public, **common)
 
     def ensure_bucket(self) -> None:

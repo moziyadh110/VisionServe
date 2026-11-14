@@ -1,9 +1,57 @@
+# Full local stack: docker compose up -d --build
+# Only Postgres/Redis/MinIO for running the API on the host: docker compose up -d postgres redis minio
+
+x-db-url: &db-url postgresql+asyncpg://visionserve:${POSTGRES_PASSWORD:-visionserve}@postgres:5432/visionserve
+
 services:
+  api:
+    build: .
+    image: visionserve-api
+    env_file:
+      - path: .env
+        required: false
+    # These win over .env: inside the compose network, services are reached by name.
+    environment:
+      DATABASE_URL: *db-url
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf_cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # One-shot job: apply database migrations, then exit. The API waits for it.
+  migrate:
+    build: .
+    image: visionserve-api  # same image as the API; the build is cached, so it's built once
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: *db-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: postgres:16
     environment:
       POSTGRES_USER: visionserve
-      POSTGRES_PASSWORD: visionserve
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-visionserve}
       POSTGRES_DB: visionserve
     ports:
       - "5432:5432"
@@ -46,3 +94,4 @@ services:
 volumes:
   pgdata:
   miniodata:
+  hf_cache:

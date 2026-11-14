@@ -38,7 +38,11 @@ class Settings(BaseSettings):
     # Redis: result cache and rate limits
     redis_url: str = "redis://localhost:6379/0"
     cache_ttl_s: int = 24 * 60 * 60
+    cache_enabled: bool = True  # turn off for the cache on/off load test
     rate_limit_algorithm: Literal["token_bucket", "fixed_window"] = "token_bucket"
+    # Requests per minute by plan. Raise these for load tests.
+    rate_limit_free_per_min: int = 60
+    rate_limit_pro_per_min: int = 600
 
     # Object storage (MinIO locally, S3 in the cloud: only these values change)
     s3_endpoint_url: str | None = "http://localhost:9000"

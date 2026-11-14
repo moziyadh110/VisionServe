@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import structlog
 from PIL import Image
 
+from app.core.metrics import BATCH_SIZE
 from app.schemas.inference import Task
 
 log = structlog.get_logger()
@@ -101,6 +102,7 @@ class Batcher:
         items = [i for i in items if not i.future.done()]
         if not items:
             return
+        BATCH_SIZE.observe(len(items))
         loop = asyncio.get_running_loop()
         try:
             texts = await loop.run_in_executor(

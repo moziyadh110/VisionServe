@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.results import cache_key, get_cached, set_cached
+from app.core.metrics import CACHE_HITS, CACHE_MISSES, INFERENCE_LATENCY
 from app.core.rate_limit import rate_limited_user
 from app.db.models import InferenceRequest, User
 from app.db.queries import get_or_create_image
@@ -51,7 +52,7 @@ async def infer(
     start = time.perf_counter()
 
     key = cache_key(task.value, settings.model_version, upload.sha256)
-    cached = await get_cached(state.redis, key)
+    cached = await get_cached(state.redis, key) if settings.cache_enabled else None
     image_id = (await get_or_create_image(session, state.storage, user_id, upload)).id
     # Commit now so the DB connection goes back to the pool while we wait on the GPU.
     # Holding a transaction open across inference would pin one pooled connection per
@@ -60,7 +61,9 @@ async def infer(
     base = dict(user_id=user_id, image_id=image_id, task=task.value)
 
     if cached is not None:
+        CACHE_HITS.labels(task.value).inc()
         latency_ms = _ms_since(start)
+        INFERENCE_LATENCY.labels(task.value, "hit").observe(latency_ms / 1000)
         row = await _save(
             session, **base, status="ok", cache_hit=True, latency_ms=latency_ms,
             result={"text": cached},
@@ -73,6 +76,8 @@ async def infer(
             batch_size=None,
             latency_ms=latency_ms,
         )
+
+    CACHE_MISSES.labels(task.value).inc()
 
     # The GPU work happens in the batcher's worker thread; this coroutine just
     # awaits its future, so the event loop stays free for other requests.
@@ -97,8 +102,10 @@ async def infer(
         )
         raise HTTPException(500, "Inference failed") from exc
 
-    await set_cached(state.redis, key, out.text, settings.cache_ttl_s)
+    if settings.cache_enabled:
+        await set_cached(state.redis, key, out.text, settings.cache_ttl_s)
     latency_ms = _ms_since(start)
+    INFERENCE_LATENCY.labels(task.value, "miss").observe(latency_ms / 1000)
     row = await _save(
         session, **base, status="ok", cache_hit=False, batch_size=out.batch_size,
         latency_ms=latency_ms, result={"text": out.text},

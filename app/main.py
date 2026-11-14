@@ -9,10 +9,11 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.api import health, images, inference, requests, users
+from app.api import health, images, inference, metrics, requests, users
 from app.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
+from app.core.metrics import QUEUE_DEPTH
 from app.core.middleware import request_context
 from app.core.rate_limit import RateLimiter
 from app.db.session import make_engine
@@ -90,6 +91,7 @@ def create_app(
             max_wait_ms=settings.max_batch_wait_ms,
             max_queue=settings.max_queue_size,
         )
+        QUEUE_DEPTH.set_function(lambda: state.batcher.depth)  # read at scrape time
         state.batcher_task = asyncio.create_task(state.batcher.run())
         state.model_task = asyncio.create_task(_load_model(app, loader))
         yield
@@ -111,6 +113,7 @@ def create_app(
     app.include_router(inference.router)
     app.include_router(requests.router)
     app.include_router(images.router)
+    app.include_router(metrics.router)
     return app
 
 

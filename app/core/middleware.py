@@ -5,6 +5,8 @@ import uuid
 import structlog
 from fastapi import Request
 
+from app.core.metrics import HTTP_REQUESTS
+
 log = structlog.get_logger()
 
 # Accept a caller's request id (e.g. from a load balancer) only if it looks sane,
@@ -28,6 +30,9 @@ async def request_context(request: Request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    # Label by route template, not the raw path, so /v1/requests/1, /2, ... share one series.
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    HTTP_REQUESTS.labels(request.method, route, str(response.status_code)).inc()
     log.info(
         "request",
         method=request.method,

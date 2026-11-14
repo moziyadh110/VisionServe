@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 from dataclasses import dataclass
@@ -32,6 +33,12 @@ async def read_upload(upload: UploadFile, max_bytes: int) -> DecodedImage:
         raise HTTPException(413, f"Image larger than {max_bytes} bytes")
     if not data:
         raise HTTPException(400, "Empty upload")
+    # Decoding a multi-megabyte JPEG and hashing it is CPU work (tens of ms). On the
+    # event loop it would stall every other request, so it runs in a worker thread.
+    return await asyncio.to_thread(_decode, data)
+
+
+def _decode(data: bytes) -> DecodedImage:
     try:
         image = Image.open(io.BytesIO(data))
         fmt = image.format

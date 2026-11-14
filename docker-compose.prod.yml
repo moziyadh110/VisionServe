@@ -1,0 +1,52 @@
+# Cloud VM overrides:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# - Images go to real S3 instead of MinIO (config only, no code change).
+# - Postgres and Redis are no longer published on the host: only the API container
+#   can reach them, over the internal compose network.
+# - Caddy terminates HTTPS on 443 and is the only public entry point.
+
+services:
+  api:
+    environment:
+      S3_ENDPOINT_URL: ""            # empty = real AWS S3
+      S3_PUBLIC_ENDPOINT_URL: ""
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET in .env}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}   # leave empty when the VM has an IAM role
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+    ports: !reset []
+    depends_on: !override
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  minio:
+    profiles: ["local-only"]  # never started in production
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

@@ -16,6 +16,7 @@ dependencies = [
     "boto3>=1.34",
     "redis>=5.0",
     "structlog>=24.1",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,10 @@ dev = [
     "fakeredis[lua]>=2.23",
     "ruff>=0.6",
 ]
+# Load testing: uv sync --group loadtest
+loadtest = [
+    "locust>=2.29",
+]
 
 [tool.ruff]
 line-length = 100
@@ -55,3 +60,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
+# Plain `pytest` (and CI) runs only fast tests that need no GPU or services.
+addopts = "-m 'not gpu and not integration'"
+markers = [
+    "gpu: loads the real Florence-2 model (run locally: pytest -m gpu)",
+    "integration: needs docker compose services (run: pytest -m integration)",
+]
