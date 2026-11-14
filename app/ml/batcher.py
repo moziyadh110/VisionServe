@@ -11,6 +11,7 @@ traffic is light) in exchange for many more images per second under load.
 """
 
 import asyncio
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import Executor
@@ -35,6 +36,9 @@ class QueueFull(Exception):
 class BatchResult:
     text: str
     batch_size: int
+    queue_ms: float = 0.0  # time spent waiting in the queue for a batch to form
+    gpu_ms: float = 0.0  # time of the forward pass this request was part of
+    batch_id: int = 0  # which forward pass; requests sharing one have the same id
 
 
 @dataclass
@@ -42,6 +46,7 @@ class _Item:
     image: Image.Image
     task: Task
     future: asyncio.Future
+    enqueued_at: float
 
 
 class Batcher:
@@ -59,6 +64,7 @@ class Batcher:
         self.max_wait_s = max_wait_ms / 1000
         self.max_queue = max_queue
         self.queue: asyncio.Queue[_Item] = asyncio.Queue()
+        self._batch_seq = 0
 
     @property
     def depth(self) -> int:
@@ -73,8 +79,11 @@ class Batcher:
         """
         if self.queue.qsize() >= self.max_queue:
             raise QueueFull()
-        future = asyncio.get_running_loop().create_future()
-        self.queue.put_nowait(_Item(image, task, future))
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        # perf_counter, not loop.time(): uvloop caches loop time per iteration,
+        # which can make short durations read tens of ms too long.
+        self.queue.put_nowait(_Item(image, task, future, time.perf_counter()))
         return await future
 
     async def _collect(self) -> list[_Item]:
@@ -103,7 +112,10 @@ class Batcher:
         if not items:
             return
         BATCH_SIZE.observe(len(items))
+        self._batch_seq += 1
+        batch_id = self._batch_seq
         loop = asyncio.get_running_loop()
+        gpu_start = time.perf_counter()
         try:
             texts = await loop.run_in_executor(
                 self.executor, self.predict_batch, [i.image for i in items], task
@@ -114,9 +126,18 @@ class Batcher:
                 if not item.future.done():
                     item.future.set_exception(exc)
             return
+        gpu_ms = (time.perf_counter() - gpu_start) * 1000
         for item, text in zip(items, texts, strict=True):
             if not item.future.done():
-                item.future.set_result(BatchResult(text=text, batch_size=len(items)))
+                item.future.set_result(
+                    BatchResult(
+                        text=text,
+                        batch_size=len(items),
+                        queue_ms=(gpu_start - item.enqueued_at) * 1000,
+                        gpu_ms=gpu_ms,
+                        batch_id=batch_id,
+                    )
+                )
 
     async def run(self) -> None:
         """Background loop, started once at app startup. Never exits on its own."""

@@ -3,9 +3,12 @@ import contextlib
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -22,6 +25,8 @@ from app.ml.model import ImageModel
 from app.storage.s3 import ObjectStore, S3Storage
 
 log = structlog.get_logger()
+
+UI_DIR = Path(__file__).parent / "ui"
 
 
 def _default_loader(settings: Settings) -> Callable[[], ImageModel]:
@@ -114,6 +119,14 @@ def create_app(
     app.include_router(requests.router)
     app.include_router(images.router)
     app.include_router(metrics.router)
+
+    # Browser front end: plain HTML/JS calling the same public API as any client.
+    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/ui/")
+
     return app
 
 

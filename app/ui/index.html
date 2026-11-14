@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VisionServe</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='white' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="brand-bg"/><circle cx="16" cy="16" r="7" fill="none" stroke="#fff" stroke-width="3"/><circle cx="16" cy="16" r="2.5" fill="#fff"/></svg>
+      <span>VisionServe</span>
+    </div>
+    <div class="health" id="health" aria-live="polite"></div>
+    <div class="topbar-right">
+      <div id="account-chip" class="account-chip" hidden></div>
+      <button class="icon-btn" id="theme-toggle" title="Toggle light/dark" aria-label="Toggle light or dark theme">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Account: shown until the browser has an API key -->
+  <section id="account" class="account" hidden>
+    <div class="account-intro">
+      <h1>Caption, read and understand images on your GPU</h1>
+      <p>Every request goes through the full production path: API-key auth, rate limiting, upload validation, a Redis cache, S3 storage, a dynamic batch queue, and Florence-2 on the GPU. Create an account to get an API key; this page stores it in your browser and sends it as <code>X-API-Key</code>, exactly like any other client.</p>
+    </div>
+    <div class="account-forms">
+      <form id="signup-form" class="card">
+        <h2>Create an account</h2>
+        <label>Email <input type="email" name="email" required placeholder="you@example.com" autocomplete="email"></label>
+        <label>Admin token <input type="password" name="admin" placeholder="ADMIN_TOKEN from .env" autocomplete="off"></label>
+        <p class="hint">Signup is admin-gated (<code>X-Admin-Token</code>). In local dev it's <code>change-me</code>.</p>
+        <button class="btn primary" type="submit">Create account</button>
+        <p class="form-error" role="alert"></p>
+      </form>
+      <form id="key-form" class="card">
+        <h2>I already have a key</h2>
+        <label>API key <input type="password" name="key" required placeholder="vs_xxxxxxxx_…" autocomplete="off"></label>
+        <p class="hint">Keys are never stored on the server, only their SHA-256 hash, so a lost key can't be recovered; create a new account or rotate.</p>
+        <button class="btn" type="submit">Use this key</button>
+        <p class="form-error" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <div id="key-reveal" class="banner" hidden>
+    <div>
+      <strong>Your API key. Copy it now; it is shown only once.</strong>
+      <code id="key-reveal-value"></code>
+    </div>
+    <div class="banner-actions">
+      <button class="btn small" id="key-copy">Copy</button>
+      <button class="btn small ghost" id="key-dismiss">Done</button>
+    </div>
+  </div>
+
+  <main id="app" hidden>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="analyze" aria-selected="true">Analyze</button>
+      <button role="tab" data-tab="lab">Batching lab</button>
+      <button role="tab" data-tab="history">History</button>
+      <button role="tab" data-tab="system">System</button>
+    </nav>
+
+    <!-- ANALYZE -->
+    <section class="tab-panel" data-panel="analyze">
+      <div class="analyze-grid">
+        <div class="card input-card">
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
+            <img id="preview" alt="" hidden>
+            <div class="dropzone-empty" id="dropzone-empty">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+              <strong>Drop an image, click to choose, or paste</strong>
+              <span>JPEG, PNG or WebP, up to 5 MB</span>
+            </div>
+          </label>
+          <div class="file-meta" id="file-meta"></div>
+          <div class="task-picker" role="radiogroup" aria-label="Task">
+            <button role="radio" data-task="caption" aria-checked="true">Caption</button>
+            <button role="radio" data-task="detailed_caption" aria-checked="false">Detailed</button>
+            <button role="radio" data-task="ocr" aria-checked="false">Read text</button>
+            <button role="radio" data-task="all" aria-checked="false">All three</button>
+          </div>
+          <button class="btn primary wide" id="run-btn" disabled>Analyze image</button>
+          <p class="hint">Run the same image twice: the second answer comes from the Redis cache, keyed by the image's SHA-256, and never touches the GPU.</p>
+        </div>
+
+        <div class="results" id="results">
+          <div class="card empty-state">
+            <h3>How a request flows</h3>
+            <ol class="flow-list">
+              <li><b>Auth</b> API key → user, checked against a SHA-256 hash</li>
+              <li><b>Rate limit</b> token bucket in Redis (Lua, atomic)</li>
+              <li><b>Decode</b> real format check, pixels, SHA-256 of the bytes</li>
+              <li><b>Cache</b> Redis lookup on <code>task : model version : hash</code></li>
+              <li><b>Store</b> image saved once per user in S3 storage + Postgres row</li>
+              <li><b>Queue</b> waits up to 10 ms for other requests to share a batch</li>
+              <li><b>GPU</b> one Florence-2 forward pass for the whole batch</li>
+              <li><b>Save</b> cache write + request row in Postgres</li>
+            </ol>
+            <p class="hint">Analyze an image to see these stages timed for your request.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- BATCHING LAB -->
+    <section class="tab-panel" data-panel="lab" hidden>
+      <div class="card lab-controls">
+        <div class="lab-copy">
+          <h2>Watch dynamic batching happen</h2>
+          <p>Fire many requests at the same moment. Each one is your image with a single pixel changed, so its SHA-256 is new and it <em>misses</em> the cache. The server's batcher collects up to 8 waiting requests (or waits 10 ms) and runs them through the GPU together. Requests that share a GPU pass line up below.</p>
+        </div>
+        <div class="lab-form">
+          <label>Requests <output id="burst-count-out">8</output>
+            <input type="range" id="burst-count" min="1" max="32" value="8">
+          </label>
+          <label>Task
+            <select id="burst-task">
+              <option value="caption">Caption</option>
+              <option value="ocr">Read text</option>
+              <option value="detailed_caption">Detailed caption</option>
+            </select>
+          </label>
+          <button class="btn primary" id="burst-btn">Fire burst</button>
+          <p class="hint" id="burst-source">Uses the image from Analyze, or a generated test image.</p>
+          <p class="hint">Free plan: 60 requests/minute. Big bursts will start returning <b>429</b>, which is the rate limiter doing its job.</p>
+        </div>
+      </div>
+      <div id="lab-results"></div>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="tab-panel" data-panel="history" hidden>
+      <div class="tiles" id="stats-tiles"></div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Your requests</h2>
+          <button class="btn small ghost" id="history-refresh">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="history-table">
+            <thead><tr><th>#</th><th>When</th><th>Task</th><th>Status</th><th>Source</th><th class="num">Batch</th><th class="num">Latency</th><th>Result</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <button class="btn small wide" id="history-more" hidden>Load older</button>
+      </div>
+      <div id="history-detail"></div>
+    </section>
+
+    <!-- SYSTEM -->
+    <section class="tab-panel" data-panel="system" hidden>
+      <p class="section-note">Live from <code>/metrics</code> (Prometheus format) and <code>/readyz</code>, refreshed every 2 seconds. These are server-wide numbers for all users. Fire a burst in the Batching lab and watch them move.</p>
+      <div class="tiles" id="system-tiles"></div>
+      <div class="chart-grid">
+        <div class="card chart-card">
+          <h3>Inference requests per second</h3>
+          <div class="chart" id="chart-rps"></div>
+        </div>
+        <div class="card chart-card">
+          <h3>Batch queue depth</h3>
+          <div class="chart" id="chart-queue"></div>
+        </div>
+        <div class="card chart-card">
+          <h3>GPU batch sizes <span class="muted">(passes, since server start)</span></h3>
+          <div class="chart" id="chart-batches"></div>
+        </div>
+        <div class="card chart-card">
+          <h3>Readiness checks</h3>
+          <div id="ready-detail"></div>
+          <details class="raw">
+            <summary>Raw metrics</summary>
+            <pre id="raw-metrics"></pre>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
